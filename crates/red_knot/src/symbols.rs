@@ -2,6 +2,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::iter::{Copied, DoubleEndedIterator, FusedIterator};
+use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
@@ -16,10 +17,11 @@ use crate::ast_ids::TypedNodeKey;
 use crate::cache::KeyValueCache;
 use crate::db::{HasJar, SemanticDb, SemanticJar};
 use crate::files::FileId;
+use crate::module::ModuleName;
 use crate::Name;
 
 #[allow(unreachable_pub)]
-#[tracing::instrument(level = "trace", skip(db))]
+#[tracing::instrument(level = "debug", skip(db))]
 pub fn symbol_table<Db>(db: &Db, file_id: FileId) -> Arc<SymbolTable>
 where
     Db: SemanticDb + HasJar<SemanticJar>,
@@ -110,14 +112,23 @@ pub(crate) enum Definition {
 
 #[derive(Debug)]
 pub(crate) struct ImportDefinition {
-    pub(crate) module: String,
+    pub(crate) module: ModuleName,
 }
 
 #[derive(Debug)]
 pub(crate) struct ImportFromDefinition {
-    pub(crate) module: Option<String>,
-    pub(crate) name: String,
+    pub(crate) module: Option<ModuleName>,
+    pub(crate) name: Name,
     pub(crate) level: u32,
+}
+
+#[derive(Debug, Clone)]
+pub enum Dependency {
+    Module(ModuleName),
+    Relative {
+        level: NonZeroU32,
+        module: Option<ModuleName>,
+    },
 }
 
 /// Table of all symbols in all scopes for a module.
@@ -126,6 +137,7 @@ pub struct SymbolTable {
     scopes_by_id: IndexVec<ScopeId, Scope>,
     symbols_by_id: IndexVec<SymbolId, Symbol>,
     defs: FxHashMap<SymbolId, Vec<Definition>>,
+    dependencies: Vec<Dependency>,
 }
 
 impl SymbolTable {
@@ -144,6 +156,7 @@ impl SymbolTable {
             scopes_by_id: IndexVec::new(),
             symbols_by_id: IndexVec::new(),
             defs: FxHashMap::default(),
+            dependencies: Vec::new(),
         };
         table.scopes_by_id.push(Scope {
             name: Name::new("<module>"),
@@ -152,6 +165,10 @@ impl SymbolTable {
             symbols_by_name: Map::default(),
         });
         table
+    }
+
+    pub(crate) fn dependencies(&self) -> &[Dependency] {
+        &self.dependencies
     }
 
     pub(crate) const fn root_scope_id() -> ScopeId {
@@ -445,10 +462,14 @@ impl PreorderVisitor<'_> for SymbolTableBuilder {
                     } else {
                         alias.name.id.split('.').next().unwrap()
                     };
+
+                    let module = ModuleName::new(&alias.name.id);
+
                     let def = Definition::Import(ImportDefinition {
-                        module: alias.name.id.clone(),
+                        module: module.clone(),
                     });
                     self.add_symbol_with_def(symbol_name, def);
+                    self.table.dependencies.push(Dependency::Module(module));
                 }
             }
             ast::Stmt::ImportFrom(ast::StmtImportFrom {
@@ -457,6 +478,8 @@ impl PreorderVisitor<'_> for SymbolTableBuilder {
                 level,
                 ..
             }) => {
+                let module = module.as_ref().map(|m| ModuleName::new(&m.id));
+
                 for alias in names {
                     let symbol_name = if let Some(asname) = &alias.asname {
                         asname.id.as_str()
@@ -464,12 +487,30 @@ impl PreorderVisitor<'_> for SymbolTableBuilder {
                         alias.name.id.as_str()
                     };
                     let def = Definition::ImportFrom(ImportFromDefinition {
-                        module: module.as_ref().map(|m| m.id.clone()),
-                        name: alias.name.id.clone(),
+                        module: module.clone(),
+                        name: Name::new(&alias.name.id),
                         level: *level,
                     });
                     self.add_symbol_with_def(symbol_name, def);
                 }
+
+                let dependency = if let Some(module) = module {
+                    match NonZeroU32::new(*level) {
+                        Some(level) => Dependency::Relative {
+                            level,
+                            module: Some(module),
+                        },
+                        None => Dependency::Module(module),
+                    }
+                } else {
+                    Dependency::Relative {
+                        level: NonZeroU32::new(*level)
+                            .expect("Import without a module to have a level > 0"),
+                        module,
+                    }
+                };
+
+                self.table.dependencies.push(dependency);
             }
             _ => {
                 ast::visitor::preorder::walk_stmt(self, stmt);

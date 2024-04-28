@@ -1,3 +1,5 @@
+pub mod check;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -5,23 +7,25 @@ use crate::db::{Db, HasJar, SemanticDb, SemanticJar, SourceDb, SourceJar};
 use crate::files::{FileId, Files};
 use crate::lint::{lint_syntax, Diagnostics, LintSyntaxStorage};
 use crate::module::{
-    add_module, path_to_module, resolve_module, set_module_search_paths, Module, ModuleData,
-    ModuleName, ModuleResolver, ModuleSearchPath,
+    add_module, file_to_module, path_to_module, resolve_module, set_module_search_paths, Module,
+    ModuleData, ModuleName, ModuleResolver, ModuleSearchPath,
 };
 use crate::parse::{parse, Parsed, ParsedStorage};
 use crate::source::{source_text, Source, SourceStorage};
 use crate::symbols::{symbol_table, SymbolId, SymbolTable, SymbolTablesStorage};
 use crate::types::{infer_symbol_type, Type, TypeStore};
+use crate::Workspace;
 
 #[derive(Debug)]
 pub struct Program {
     files: Files,
     source: SourceJar,
     semantic: SemanticJar,
+    workspace: Workspace,
 }
 
 impl Program {
-    pub fn new(module_search_paths: Vec<ModuleSearchPath>, files: Files) -> Self {
+    pub fn new(workspace: Workspace, module_search_paths: Vec<ModuleSearchPath>) -> Self {
         Self {
             source: SourceJar {
                 sources: SourceStorage::default(),
@@ -33,7 +37,8 @@ impl Program {
                 symbol_tables: SymbolTablesStorage::default(),
                 type_store: TypeStore::default(),
             },
-            files,
+            files: Files::default(),
+            workspace,
         }
     }
 
@@ -52,6 +57,18 @@ impl Program {
             // TODO: remove all dependent modules as well
             self.semantic.type_store.remove_module(change.id);
         }
+    }
+
+    pub fn files(&self) -> &Files {
+        &self.files
+    }
+
+    pub fn workspace(&self) -> &Workspace {
+        &self.workspace
+    }
+
+    pub fn workspace_mut(&mut self) -> &mut Workspace {
+        &mut self.workspace
     }
 }
 
@@ -82,14 +99,19 @@ impl SemanticDb for Program {
         resolve_module(self, name)
     }
 
+    fn file_to_module(&self, file_id: FileId) -> Option<Module> {
+        file_to_module(self, file_id)
+    }
+
+    fn path_to_module(&self, path: &Path) -> Option<Module> {
+        path_to_module(self, path)
+    }
+
     fn symbol_table(&self, file_id: FileId) -> Arc<SymbolTable> {
         symbol_table(self, file_id)
     }
 
     // Mutations
-    fn path_to_module(&mut self, path: &Path) -> Option<Module> {
-        path_to_module(self, path)
-    }
 
     fn add_module(&mut self, path: &Path) -> Option<(Module, Vec<Arc<ModuleData>>)> {
         add_module(self, path)
